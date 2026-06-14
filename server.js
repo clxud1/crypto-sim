@@ -350,3 +350,28 @@ const PORT=process.env.PORT||3000;
 server.listen(PORT,()=>{
 console.log("running on",PORT);
 });
+async function updatePrice(){
+
+try{
+
+const r=await axios.get(
+"https://api.binance.com/api/v3/ticker/price",
+{
+params:{symbol},
+timeout:5000
+}
+);
+
+console.log("STATUS:",r.status);
+console.log("DATA:",r.data);
+
+price=Number(r.data.price);
+
+}catch(e){
+
+console.log("ERROR MESSAGE:",e.message);
+console.log("ERROR CODE:",e.code);
+
+}
+
+}
