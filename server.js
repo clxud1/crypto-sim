@@ -3,6 +3,7 @@ const http=require("http");
 const {Server}=require("socket.io");
 const axios=require("axios");
 const fs=require("fs");
+const WebSocket=require("ws");
 
 const app=express();
 const server=http.createServer(app);
@@ -55,45 +56,59 @@ return users[ip];
 
 
 // =====================
-// MARKET
+// MARKET STATE
 // =====================
 
-let symbol="BTCUSDT";
-
-const BASE_URLS=[
-"https://api.binance.com",
-"https://data.binance.com",
-"https://api1.binance.com"
-];
-
-async function safeRequest(url,config){
-
-try{
-
-const r=await axios.get(url,config);
-return r.data;
-
-}catch(e){
-return null;
-}
-
-}
+let symbol="btcusdt";
+let price=0;
+let change=0;
 
 
 
 // =====================
-// CHART (SAFE)
+// BINANCE WEB SOCKET (FIX)
+// =====================
+
+function connectWS(){
+
+const ws=new WebSocket(`wss://stream.binance.com:9443/ws/${symbol}@ticker`);
+
+ws.on("message",(msg)=>{
+
+let data=JSON.parse(msg);
+
+price=Number(data.c);
+change=Number(data.P);
+
+});
+
+ws.on("close",()=>{
+setTimeout(connectWS,3000);
+});
+
+ws.on("error",()=>{
+ws.close();
+});
+
+}
+
+connectWS();
+
+
+
+// =====================
+// CHART (REST OK)
 // =====================
 
 async function getChart(){
 
-for(let base of BASE_URLS){
+try{
 
-const data=await safeRequest(
-`${base}/api/v3/klines`,
+const r=await axios.get(
+"https://api.binance.com/api/v3/klines",
 {
 params:{
-symbol,
+symbol:symbol.toUpperCase(),
 interval:"1m",
 limit:100
 },
@@ -101,9 +116,7 @@ timeout:5000
 }
 );
 
-if(data){
-
-return data.map(x=>({
+return r.data.map(x=>({
 time:x[0]/1000,
 open:+x[1],
 high:+x[2],
@@ -111,47 +124,9 @@ low:+x[3],
 close:+x[4]
 }));
 
-}
-
-}
-
+}catch(e){
 return [];
-
 }
-
-
-
-// =====================
-// TICKER (SAFE)
-// =====================
-
-async function getTicker(){
-
-for(let base of BASE_URLS){
-
-const data=await safeRequest(
-`${base}/api/v3/ticker/24hr`,
-{
-params:{symbol},
-timeout:5000
-}
-);
-
-if(data && data.lastPrice){
-
-return{
-price:Number(data.lastPrice),
-change:Number(data.priceChangePercent)
-};
-
-}
-
-}
-
-return{
-price:0,
-change:0
-};
 
 }
 
@@ -174,15 +149,12 @@ return (p.entry-price)*p.amount*p.leverage;
 
 
 // =====================
-// UPDATE LOOP
+// UPDATE LOOP (NO REST PRICE)
 // =====================
 
 async function update(){
 
 let chart=await getChart();
-let ticker=await getTicker();
-
-let price=ticker.price;
 
 for(let ip in users){
 
@@ -199,25 +171,31 @@ user._asset=user.cash+totalPNL;
 }
 
 io.emit("market",{
-symbol,
+symbol:symbol.toUpperCase(),
 price,
-change:ticker.change,
+change,
 chart
 });
 
 }
 
-setInterval(update,2000);
+setInterval(update,1000);
 
 
 
 // =====================
-// COIN
+// COIN CHANGE
 // =====================
 
 app.post("/coin",(req,res)=>{
-symbol=req.body.symbol;
+
+symbol=req.body.symbol.toLowerCase();
+
+// WS 재연결
+connectWS();
+
 res.json({ok:true});
+
 });
 
 
@@ -320,19 +298,36 @@ res.json({message:"CLOSE"});
 
 app.get("/mini/:coin",async(req,res)=>{
 
-let old=symbol;
+try{
 
-symbol=req.params.coin;
-
-let chart=await getChart();
-let ticker=await getTicker();
-
-symbol=old;
+const r=await axios.get(
+"https://api.binance.com/api/v3/klines",
+{
+params:{
+symbol:req.params.coin.toUpperCase(),
+interval:"1m",
+limit:100
+},
+timeout:5000
+}
+);
 
 res.json({
-price:ticker.price,
-chart
+price,
+chart:r.data.map(x=>({
+time:x[0]/1000,
+open:+x[1],
+high:+x[2],
+low:+x[3],
+close:+x[4]
+}))
 });
+
+}catch(e){
+
+res.json({price,chart:[]});
+
+}
 
 });
 
@@ -342,8 +337,8 @@ chart
 // SERVER
 // =====================
 
-const PORT = process.env.PORT || 3000;
+const PORT=process.env.PORT||3000;
 
 server.listen(PORT,()=>{
-console.log("server running on",PORT);
+console.log("running on",PORT);
 });
