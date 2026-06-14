@@ -3,7 +3,6 @@ const http=require("http");
 const {Server}=require("socket.io");
 const axios=require("axios");
 const fs=require("fs");
-const WebSocket=require("ws");
 
 const app=express();
 const server=http.createServer(app);
@@ -59,45 +58,47 @@ return users[ip];
 // MARKET STATE
 // =====================
 
-let symbol="btcusdt";
+let symbol="BTCUSDT";
 let price=0;
 let change=0;
 
 
 
 // =====================
-// BINANCE WEB SOCKET (FIX)
+// SAFE REST PRICE (FIX 핵심)
 // =====================
 
-function connectWS(){
+async function updatePrice(){
 
-const ws=new WebSocket(`wss://stream.binance.com:9443/ws/${symbol}@ticker`);
+try{
 
-ws.on("message",(msg)=>{
+const r=await axios.get(
+"https://api.binance.com/api/v3/ticker/24hr",
+{
+params:{symbol},
+timeout:5000
+}
+);
 
-let data=JSON.parse(msg);
+if(r.data && r.data.lastPrice){
 
-price=Number(data.c);
-change=Number(data.P);
-
-});
-
-ws.on("close",()=>{
-setTimeout(connectWS,3000);
-});
-
-ws.on("error",()=>{
-ws.close();
-});
+price=Number(r.data.lastPrice);
+change=Number(r.data.priceChangePercent);
 
 }
 
-connectWS();
+}catch(e){
+
+console.log("price fetch fail:",e.message);
+
+}
+
+}
 
 
 
 // =====================
-// CHART (REST OK)
+// CHART
 // =====================
 
 async function getChart(){
@@ -108,7 +109,7 @@ const r=await axios.get(
 "https://api.binance.com/api/v3/klines",
 {
 params:{
-symbol:symbol.toUpperCase(),
+symbol,
 interval:"1m",
 limit:100
 },
@@ -125,7 +126,9 @@ close:+x[4]
 }));
 
 }catch(e){
+
 return [];
+
 }
 
 }
@@ -138,6 +141,8 @@ return [];
 
 function calculate(p,price){
 
+if(!price) return 0;
+
 if(p.side==="LONG"){
 return (price-p.entry)*p.amount*p.leverage;
 }else{
@@ -149,10 +154,12 @@ return (p.entry-price)*p.amount*p.leverage;
 
 
 // =====================
-// UPDATE LOOP (NO REST PRICE)
+// UPDATE LOOP
 // =====================
 
 async function update(){
+
+await updatePrice();
 
 let chart=await getChart();
 
@@ -162,7 +169,7 @@ let user=users[ip];
 
 for(let p of user.positions){
 p.pnl=calculate(p,price);
-p.percent=(p.pnl/p.margin)*100;
+p.percent=p.margin? (p.pnl/p.margin)*100 : 0;
 }
 
 let totalPNL=user.positions.reduce((a,b)=>a+b.pnl,0);
@@ -171,7 +178,7 @@ user._asset=user.cash+totalPNL;
 }
 
 io.emit("market",{
-symbol:symbol.toUpperCase(),
+symbol,
 price,
 change,
 chart
@@ -189,10 +196,7 @@ setInterval(update,1000);
 
 app.post("/coin",(req,res)=>{
 
-symbol=req.body.symbol.toLowerCase();
-
-// WS 재연결
-connectWS();
+symbol=req.body.symbol;
 
 res.json({ok:true});
 
@@ -201,7 +205,7 @@ res.json({ok:true});
 
 
 // =====================
-// OPEN
+// OPEN ORDER
 // =====================
 
 app.post("/open",(req,res)=>{
@@ -214,6 +218,10 @@ amount=Math.floor(Number(amount));
 
 if(amount<=0){
 return res.json({message:"수량 오류"});
+}
+
+if(!price || price<=0){
+return res.json({message:"가격 오류"});
 }
 
 let margin=amount*price/leverage;
@@ -265,7 +273,7 @@ res.json({message:"OPEN"});
 
 
 // =====================
-// CLOSE
+// CLOSE ORDER
 // =====================
 
 app.post("/close",(req,res)=>{
