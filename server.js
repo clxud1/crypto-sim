@@ -1,203 +1,349 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const axios = require("axios");
+const express=require("express");
+const http=require("http");
+const {Server}=require("socket.io");
+const axios=require("axios");
+const fs=require("fs");
 
-const app = express();
+const app=express();
+const server=http.createServer(app);
+const io=new Server(server);
 
-// =====================
-// ⭐ RENDER PORT FIX
-// =====================
-const server = http.createServer(app);
-const io = new Server(server);
-
-const PORT = process.env.PORT || 14000;
-
-// =====================
-// MIDDLEWARE
-// =====================
 app.use(express.static("public"));
 app.use(express.json());
 
-// =====================
-// STATE
-// =====================
-let symbol = "BTCUSDT";
-let cash = 10000;
-let positions = [];
 
-const symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
-
-let prices = {};
-symbols.forEach(s => (prices[s] = 0));
 
 // =====================
-// PRICE UPDATE
+// USERS (IP BASED)
 // =====================
-async function updatePrices() {
-  await Promise.all(
-    symbols.map(async (s) => {
-      try {
-        const r = await axios.get(
-          "https://api.binance.com/api/v3/ticker/price",
-          { params: { symbol: s } }
-        );
-        prices[s] = +r.data.price;
-      } catch (e) {}
-    })
-  );
+
+let users={};
+
+function loadUsers(){
+if(fs.existsSync("users.json")){
+users=JSON.parse(fs.readFileSync("users.json"));
+}else{
+users={}
+}
 }
 
-// =====================
-// CHART
-// =====================
-async function getChart() {
-  try {
-    const r = await axios.get(
-      "https://api.binance.com/api/v3/klines",
-      {
-        params: {
-          symbol,
-          interval: "1m",
-          limit: 200
-        }
-      }
-    );
-
-    return r.data.map(x => ({
-      time: x[0] / 1000,
-      open: +x[1],
-      high: +x[2],
-      low: +x[3],
-      close: +x[4]
-    }));
-  } catch {
-    return [];
-  }
+function saveUsers(){
+fs.writeFileSync("users.json",JSON.stringify(users,null,2));
 }
+
+loadUsers();
+
+function getIP(req){
+return (req.headers["x-forwarded-for"] || req.socket.remoteAddress)
+.split(",")[0].trim();
+}
+
+function getUser(req){
+
+let ip=getIP(req);
+
+if(!users[ip]){
+users[ip]={
+cash:10000,
+positions:[]
+};
+}
+
+return users[ip];
+}
+
+
+
+// =====================
+// MARKET
+// =====================
+
+let symbol="BTCUSDT";
+
+const BASE_URLS=[
+"https://api.binance.com",
+"https://data.binance.com",
+"https://api1.binance.com"
+];
+
+async function safeRequest(url,config){
+
+try{
+
+const r=await axios.get(url,config);
+return r.data;
+
+}catch(e){
+return null;
+}
+
+}
+
+
+
+// =====================
+// CHART (SAFE)
+// =====================
+
+async function getChart(){
+
+for(let base of BASE_URLS){
+
+const data=await safeRequest(
+`${base}/api/v3/klines`,
+{
+params:{
+symbol,
+interval:"1m",
+limit:100
+},
+timeout:5000
+}
+);
+
+if(data){
+
+return data.map(x=>({
+time:x[0]/1000,
+open:+x[1],
+high:+x[2],
+low:+x[3],
+close:+x[4]
+}));
+
+}
+
+}
+
+return [];
+
+}
+
+
+
+// =====================
+// TICKER (SAFE)
+// =====================
+
+async function getTicker(){
+
+for(let base of BASE_URLS){
+
+const data=await safeRequest(
+`${base}/api/v3/ticker/24hr`,
+{
+params:{symbol},
+timeout:5000
+}
+);
+
+if(data && data.lastPrice){
+
+return{
+price:Number(data.lastPrice),
+change:Number(data.priceChangePercent)
+};
+
+}
+
+}
+
+return{
+price:0,
+change:0
+};
+
+}
+
+
+
+// =====================
+// PNL
+// =====================
+
+function calculate(p,price){
+
+if(p.side==="LONG"){
+return (price-p.entry)*p.amount*p.leverage;
+}else{
+return (p.entry-price)*p.amount*p.leverage;
+}
+
+}
+
+
 
 // =====================
 // UPDATE LOOP
 // =====================
-async function update() {
-  await updatePrices();
 
-  const chart = await getChart();
+async function update(){
 
-  positions.forEach(p => {
-    const cp = prices[p.symbol] || p.entry;
+let chart=await getChart();
+let ticker=await getTicker();
 
-    p.currentPrice = cp;
+let price=ticker.price;
 
-    p.pnl =
-      (cp - p.entry) *
-      p.amount *
-      p.leverage *
-      (p.side === "LONG" ? 1 : -1);
+for(let ip in users){
 
-    p.percent = p.margin ? (p.pnl / p.margin) * 100 : 0;
-  });
+let user=users[ip];
 
-  const totalValue = positions.reduce((sum, p) => {
-    return sum + p.amount * (p.currentPrice ?? p.entry);
-  }, 0);
-
-  const asset = cash + totalValue;
-
-  let change = 0;
-  try {
-    const r = await axios.get(
-      "https://api.binance.com/api/v3/ticker/24hr",
-      { params: { symbol } }
-    );
-    change = +r.data.priceChangePercent;
-  } catch {}
-
-  io.emit("market", {
-    symbol,
-    price: prices[symbol] || 0,
-    change,
-    chart,
-    cash,
-    asset,
-    positions
-  });
+for(let p of user.positions){
+p.pnl=calculate(p,price);
+p.percent=(p.pnl/p.margin)*100;
 }
 
+let totalPNL=user.positions.reduce((a,b)=>a+b.pnl,0);
+user._asset=user.cash+totalPNL;
+
+}
+
+io.emit("market",{
+symbol,
+price,
+change:ticker.change,
+chart
+});
+
+}
+
+setInterval(update,2000);
+
+
+
 // =====================
-// SOCKET LOOP
+// COIN
 // =====================
-setInterval(update, 5000);
+
+app.post("/coin",(req,res)=>{
+symbol=req.body.symbol;
+res.json({ok:true});
+});
+
+
+
+// =====================
+// OPEN
+// =====================
+
+app.post("/open",(req,res)=>{
+
+let user=getUser(req);
+
+let {side,leverage,amount,price}=req.body;
+
+amount=Math.floor(Number(amount));
+
+if(amount<=0){
+return res.json({message:"수량 오류"});
+}
+
+let margin=amount*price/leverage;
+
+if(margin>user.cash){
+return res.json({message:"예수금 부족"});
+}
+
+user.cash-=margin;
+
+let same=user.positions.find(
+p=>p.symbol===symbol && p.side===side
+);
+
+if(same){
+
+let total=same.amount+amount;
+
+same.entry=
+(same.entry*same.amount+price*amount)/total;
+
+same.amount=total;
+same.margin+=margin;
+
+}else{
+
+user.positions.push({
+id:Date.now(),
+symbol,
+side,
+leverage,
+amount,
+entry:price,
+margin,
+pnl:0,
+percent:0
+});
+
+}
+
+saveUsers();
+
 update();
 
+res.json({message:"OPEN"});
+
+});
+
+
+
 // =====================
-// ROUTES
-// =====================
-app.get("/", (req, res) => {
-  res.send("Crypto Exchange Server Running");
-});
-
-// COIN CHANGE
-app.post("/coin", (req, res) => {
-  symbol = req.body.symbol;
-  update();
-  res.json({ ok: true });
-});
-
-// OPEN
-app.post("/open", (req, res) => {
-  let { side, leverage, amount, price } = req.body;
-
-  amount = Number(amount);
-  leverage = Number(leverage);
-  price = Number(price);
-
-  if (!side || amount <= 0) {
-    return res.json({ ok: false });
-  }
-
-  const margin = amount * price;
-
-  if (margin > cash) {
-    return res.json({ ok: false, message: "예수금 부족" });
-  }
-
-  cash -= margin;
-
-  positions.push({
-    id: Date.now(),
-    symbol,
-    side,
-    leverage,
-    amount,
-    entry: price,
-    margin,
-    pnl: 0,
-    percent: 0,
-    currentPrice: price
-  });
-
-  update();
-  res.json({ ok: true });
-});
-
 // CLOSE
-app.post("/close", (req, res) => {
-  const p = positions.find(x => x.id === req.body.id);
+// =====================
 
-  if (!p) return res.json({ ok: false });
+app.post("/close",(req,res)=>{
 
-  cash += p.margin + p.pnl;
+let user=getUser(req);
 
-  positions = positions.filter(x => x.id !== p.id);
+let p=user.positions.find(x=>x.id===req.body.id);
 
-  update();
-  res.json({ ok: true });
+if(!p){
+return res.json({message:"no"});
+}
+
+user.cash+=p.margin+p.pnl;
+
+user.positions=user.positions.filter(x=>x.id!==p.id);
+
+saveUsers();
+
+update();
+
+res.json({message:"CLOSE"});
+
 });
 
+
+
 // =====================
-// START SERVER (⭐ RENDER FIX)
+// MINI CHART
 // =====================
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+
+app.get("/mini/:coin",async(req,res)=>{
+
+let old=symbol;
+
+symbol=req.params.coin;
+
+let chart=await getChart();
+let ticker=await getTicker();
+
+symbol=old;
+
+res.json({
+price:ticker.price,
+chart
+});
+
+});
+
+
+
+// =====================
+// SERVER
+// =====================
+
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT,()=>{
+console.log("server running on",PORT);
 });
