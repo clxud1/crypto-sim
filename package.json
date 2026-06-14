@@ -1,0 +1,10 @@
+{
+  "scripts":{
+    "dev":"nodemon server.js --ignore users.json"
+  },
+  "dependencies":{
+    "express":"latest",
+    "socket.io":"latest",
+    "axios":"latest"
+  }
+}

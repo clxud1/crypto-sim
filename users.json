@@ -1,0 +1,34 @@
+{
+  "::1": {
+    "cash": 9983.2602,
+    "positions": [
+      {
+        "id": 1781434237822,
+        "symbol": "ETHUSDT",
+        "side": "LONG",
+        "leverage": 500,
+        "amount": 5,
+        "entry": 1673.98,
+        "margin": 16.7398,
+        "pnl": 1150.000000000091,
+        "percent": 6869.855075927378
+      }
+    ]
+  },
+  "demo": {
+    "cash": 9983.2634,
+    "positions": [
+      {
+        "id": 1781434648945,
+        "symbol": "ETHUSDT",
+        "side": "LONG",
+        "leverage": 500,
+        "amount": 5,
+        "entry": 1673.66,
+        "margin": 16.736600000000003,
+        "pnl": 0,
+        "percent": 0
+      }
+    ]
+  }
+}
